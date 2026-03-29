@@ -56,15 +56,28 @@ export function attachWkHangulIme(
 
   let composing = false;
   let pending = "";
+  let flushTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function clearFlushTimer(): void {
+    if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
+  }
 
   function flush(): void {
+    clearFlushTimer();
     if (!composing) return;
     const text = pending;
     composing = false;
     pending = "";
+    // Clear textarea so xterm doesn't re-process the same text
+    ta.value = "";
     if (text) {
       onComposed(text);
     }
+  }
+
+  function scheduleFlush(): void {
+    clearFlushTimer();
+    flushTimer = setTimeout(flush, 300);
   }
 
   // keydown: detect end of IME (non-229 key after composing)
@@ -89,6 +102,7 @@ export function attachWkHangulIme(
     if (ie.inputType === "insertReplacementText" && ie.data) {
       composing = true;
       pending = ie.data;
+      scheduleFlush(); // auto-flush after 300ms idle
       e.stopImmediatePropagation();
       e.preventDefault();
       return;
@@ -102,6 +116,7 @@ export function attachWkHangulIme(
       }
       composing = true;
       pending = ie.data;
+      scheduleFlush(); // auto-flush after 300ms idle
       e.stopImmediatePropagation();
       e.preventDefault();
       return;
@@ -121,8 +136,15 @@ export function attachWkHangulIme(
     }
   }
 
-  ta.addEventListener("keydown", onKeydown, true);
-  ta.addEventListener("input", onInput, true);
+  // Register on textarea's PARENT element in capture phase.
+  // When both our handler and xterm's handler are on the same element (textarea)
+  // in capture phase, they fire in registration order — xterm's fires first
+  // because it was registered during terminal.open().
+  // By attaching to the PARENT, our capture handler fires BEFORE the event
+  // reaches the textarea, so stopImmediatePropagation blocks xterm's handler.
+  const captureTarget = ta.parentElement ?? ta;
+  captureTarget.addEventListener("keydown", onKeydown, true);
+  captureTarget.addEventListener("input", onInput, true);
   ta.addEventListener("blur", onBlur, true);
 
   // Block xterm's internal _keyDown + CompositionHelper._handleAnyTextareaChanges
@@ -144,8 +166,8 @@ export function attachWkHangulIme(
       return false;
     },
     dispose() {
-      ta.removeEventListener("keydown", onKeydown, true);
-      ta.removeEventListener("input", onInput, true);
+      captureTarget.removeEventListener("keydown", onKeydown, true);
+      captureTarget.removeEventListener("input", onInput, true);
       ta.removeEventListener("blur", onBlur, true);
     },
   };
