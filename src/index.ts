@@ -1,8 +1,12 @@
 /**
- * WKWebView Hangul IME Emulator for xterm.js
+ * !! CRITICAL — DO NOT MODIFY WITHOUT TESTING KOREAN INPUT !!
+ * !! 이 파일 수정 시 반드시 npm run tauri dev에서 "안녕하세요" 입력 테스트 !!
+ * !! GitHub: https://github.com/thedalbee/wk-hangul-ime !!
  *
- * Safari/WKWebView does NOT fire compositionstart/compositionend for Korean IME
- * (WebKit Bug #274700). Instead it fires:
+ * WKWebView Hangul IME Emulator
+ *
+ * Safari/WKWebView does NOT fire compositionstart/compositionend for Korean IME.
+ * Instead it fires:
  *   - inputType "insertText" for initial jamo (ㅎ)
  *   - inputType "insertReplacementText" for composition updates (ㅎ→하→한)
  *
@@ -13,33 +17,13 @@
  * Based on xterm.js PR #5704 (minemos) — adapted as external interceptor
  * per maintainer (Tyriar) recommendation.
  *
- * @see https://github.com/xtermjs/xterm.js/pull/5704
- * @see https://bugs.webkit.org/show_bug.cgi?id=274700
- *
- * @example
- * ```typescript
- * import { Terminal } from "@xterm/xterm";
- * import { attachWkHangulIme } from "wk-hangul-ime";
- *
- * const terminal = new Terminal();
- * terminal.open(container);
- *
- * const ime = attachWkHangulIme(terminal, (composedText) => {
- *   // Send composed Korean text to your backend (PTY, WebSocket, etc.)
- *   ptyWrite(composedText);
- * });
- *
- * terminal.onData((data) => {
- *   if (ime.shouldSkip(data)) return; // Skip leaked jamo during composition
- *   ptyWrite(data);
- * });
- *
- * // Cleanup
- * ime.dispose();
- * ```
+ * Reference: https://github.com/xtermjs/xterm.js/pull/5704
+ * WebKit Bug: https://bugs.webkit.org/show_bug.cgi?id=274700
  */
 
-export function isHangul(text: string): boolean {
+import type { Terminal } from "@xterm/xterm";
+
+function isHangul(text: string): boolean {
   if (!text) return false;
   const cp = text.codePointAt(0)!;
   return (
@@ -51,36 +35,20 @@ export function isHangul(text: string): boolean {
   );
 }
 
+/**
+ * Attach WKWebView Hangul IME handling to an xterm.js Terminal.
+ * Call AFTER terminal.open() so terminal.textarea exists.
+ * Returns a cleanup function.
+ */
 export interface WkHangulImeHandle {
-  /**
-   * Call from terminal.onData — returns true if the data is Korean jamo
-   * that leaked through during active composition and should be skipped.
-   */
+  /** Call from terminal.onData — returns true if the data was from IME and should be skipped */
   shouldSkip(data: string): boolean;
-  /** Remove all event listeners */
+  /** Cleanup listeners */
   dispose(): void;
 }
 
-/**
- * Attach WKWebView Hangul IME handling to an xterm.js Terminal instance.
- *
- * Must be called AFTER `terminal.open(container)` so `terminal.textarea` exists.
- *
- * Works with xterm.js v5.x and v6.x (any version with `terminal.textarea` API).
- *
- * Three-layer defense:
- * 1. `attachCustomKeyEventHandler` — blocks keyCode 229 from reaching xterm's
- *    _keyDown and CompositionHelper._handleAnyTextareaChanges
- * 2. `stopImmediatePropagation` on input events — blocks xterm's _inputEvent
- *    from processing insertReplacementText and Hangul insertText
- * 3. `shouldSkip()` — filters any remaining jamo that leak through onData
- *
- * @param terminal - xterm.js Terminal instance (after open())
- * @param onComposed - callback receiving the final composed Korean text
- * @returns Handle with shouldSkip() and dispose() methods
- */
 export function attachWkHangulIme(
-  terminal: { textarea?: HTMLTextAreaElement; attachCustomKeyEventHandler(handler: (event: KeyboardEvent) => boolean): void },
+  terminal: Terminal,
   onComposed: (text: string) => void
 ): WkHangulImeHandle {
   const ta = terminal.textarea;
@@ -99,16 +67,25 @@ export function attachWkHangulIme(
     }
   }
 
+  // keydown: detect end of IME (non-229 key after composing)
   function onKeydown(e: KeyboardEvent): void {
-    if (composing && e.keyCode !== 229) {
+    if (e.keyCode === 229 || e.isComposing) {
+      // Block CompositionHelper's own keydown listener from running
+      // _handleAnyTextareaChanges (which sends partial jamo)
+      e.stopImmediatePropagation();
+      return;
+    }
+    if (composing) {
       flush();
     }
   }
 
+  // input: intercept insertReplacementText and Hangul insertText
+  // Use capture phase to fire BEFORE xterm's handler
   function onInput(e: Event): void {
     const ie = e as InputEvent;
 
-    // 1. insertReplacementText = WKWebView composition update (ㅎ→하→한)
+    // 1. insertReplacementText = WKWebView composition update
     if (ie.inputType === "insertReplacementText" && ie.data) {
       composing = true;
       pending = ie.data;
@@ -117,10 +94,11 @@ export function attachWkHangulIme(
       return;
     }
 
-    // 2. Hangul insertText = initial jamo or start of new syllable
+    // 2. Hangul insertText = WKWebView initial jamo or new syllable
     if (ie.inputType === "insertText" && ie.data && isHangul(ie.data)) {
+      // If we were already composing, flush previous syllable first
       if (composing) {
-        flush(); // flush previous syllable
+        flush();
       }
       composing = true;
       pending = ie.data;
@@ -129,35 +107,39 @@ export function attachWkHangulIme(
       return;
     }
 
-    // 3. Non-Hangul input — flush any pending composition
+    // 3. Non-Hangul insertText — flush any pending composition first
     if (composing) {
       flush();
     }
+    // Let xterm handle normally
   }
 
+  // blur: flush when focus leaves (user clicks elsewhere)
   function onBlur(): void {
     if (composing) {
       flush();
     }
   }
 
-  // Attach listeners in capture phase (fires before xterm's target-phase handlers)
   ta.addEventListener("keydown", onKeydown, true);
   ta.addEventListener("input", onInput, true);
   ta.addEventListener("blur", onBlur, true);
 
-  // Block xterm's _keyDown + CompositionHelper for IME keys.
-  // Without this, CompositionHelper reads textarea value on keydown(229)
-  // and sends partial jamo via triggerDataEvent → onData.
+  // Block xterm's internal _keyDown + CompositionHelper._handleAnyTextareaChanges
+  // for keyCode 229 (IME processing). Without this, CompositionHelper reads the
+  // textarea value on keydown(229) and sends partial jamo via triggerDataEvent.
+  // Returning false from attachCustomKeyEventHandler prevents xterm from
+  // processing the keydown at all — our input event handler takes over.
   terminal.attachCustomKeyEventHandler((event: KeyboardEvent) => {
     if (event.type === "keydown" && (event.keyCode === 229 || event.isComposing)) {
-      return false;
+      return false; // block xterm's keydown processing for IME keys
     }
     return true;
   });
 
   return {
     shouldSkip(data: string): boolean {
+      // If we're composing, skip any Hangul data that leaks through onData
       if (composing && data.length === 1 && isHangul(data)) return true;
       return false;
     },
