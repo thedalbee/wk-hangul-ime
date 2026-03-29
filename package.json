@@ -1,0 +1,28 @@
+{
+  "name": "wk-hangul-ime",
+  "version": "1.0.0",
+  "description": "Fix Korean (Hangul) IME input for xterm.js in Safari / WKWebView / Tauri v2",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "keywords": [
+    "xterm",
+    "xterm.js",
+    "korean",
+    "hangul",
+    "ime",
+    "wkwebview",
+    "safari",
+    "tauri",
+    "composition",
+    "input-method"
+  ],
+  "author": "dalbee",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/thedalbee/wk-hangul-ime"
+  },
+  "peerDependencies": {
+    "@xterm/xterm": ">=5.0.0"
+  }
+}
